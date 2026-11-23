@@ -1,0 +1,35 @@
+ORIENTIERUNG – Bündelausgleich
+Passpunkte: 8, Verknüpfungspunkte: 110 (verworfene Beobachtungen: 0)
+σ0 a posteriori = 0.450  (a priori 1; σ_Bild Passp. 0.30 px, Verkn. 0.30 px)
+Redundanz r = 130, Iterationen 4
+
+Äußere Orientierung (ω, φ, κ photogrammetrisch, gon):
+Bild             X0             Y0          Z0          ω          φ          κ | σX0[m] σY0[m] σZ0[m] σω[mgon] σφ[mgon] σκ[mgon]
+   1     749940.328    5400001.859     750.086     0.6544    -0.4603     1.2792 | 0.129  0.142  0.028  0.30  0.27  0.05
+   2     750062.291    5399997.016     751.998    -0.3848     0.8050     2.2299 | 0.120  0.132  0.032  0.28  0.26  0.05
+
+Passpunkte – Verbesserungen Objekt [m] und Bild [px]:
+      Id       vX       vY       vZ |     vx1     vy1     vx2     vy2
+      P1   -0.000    0.007   -0.001 |    0.05   -0.20   -0.06   -0.05
+      P2    0.010    0.008    0.000 |    0.41   -0.19   -0.06   -0.07
+      P3    0.005   -0.009    0.001 |   -0.13    0.25    0.29    0.06
+      P4   -0.003    0.006   -0.001 |   -0.24   -0.59    0.13    0.37
+      P5    0.017   -0.000    0.003 |    0.13    0.08    0.44   -0.05
+      P6   -0.001    0.005    0.002 |    0.06   -0.20   -0.09    0.01
+      P7   -0.018   -0.007   -0.001 |   -0.26    0.29   -0.35   -0.05
+      P8   -0.010   -0.010   -0.003 |    0.00    0.03   -0.35    0.30
+
+RMS Bildverbesserungen Verknüpfungspunkte: 0.038 px
+
+Kontrollpunkte (Vorwärtsschnitt − Sollkoordinate) [m]:
+      Id       dX       dY       dZ |      σX      σY      σZ
+      K1   -0.046   -0.004    0.050 |   0.043   0.044   0.245
+      K2   -0.009   -0.041    0.005 |   0.045   0.036   0.233
+      K3   -0.096    0.043   -0.369 |   0.037   0.046   0.243
+      K4    0.035    0.042   -0.106 |   0.053   0.049   0.231
+     RMS    0.056    0.036    0.193
+
+PRODUKTE
+Rasterweite 0.5 m, DOM 524×553 Zellen (264670 belegt), DGM 264160 belegt
+σZ (theor., 0,25 px Disparität): 0.139 m
+Dateien: ergebnis
