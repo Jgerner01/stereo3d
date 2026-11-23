@@ -166,6 +166,98 @@ impl Grid {
         Ok(())
     }
 
+    /// GeoTIFF (Float32, 1 Band, unkomprimiert, NoData -9999). `epsg` = 0: kein CRS-Eintrag.
+    pub fn write_geotiff(&self, path: &Path, epsg: u32) -> Result<()> {
+        std::fs::write(path, self.geotiff_bytes(epsg))?;
+        Ok(())
+    }
+
+    pub fn geotiff_bytes(&self, epsg: u32) -> Vec<u8> {
+        // Pixeldaten: Zeile 0 = Norden
+        let mut data = Vec::with_capacity(self.nx * self.ny * 4);
+        for iy in (0..self.ny).rev() {
+            for ix in 0..self.nx {
+                let v = self.z[self.idx(ix, iy)];
+                data.extend_from_slice(&(if v.is_finite() { v } else { -9999.0 }).to_le_bytes());
+            }
+        }
+        let top = self.y0 + self.ny as f64 * self.cell;
+        let mut extra: Vec<u8> = Vec::new(); // Daten außerhalb der IFD-Einträge
+        // (tag, type, count, value-or-offset-marker)
+        struct E(u16, u16, u32, Vec<u8>);
+        let u16b = |v: &[u16]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+        let f64b = |v: &[f64]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+        let mut keys: Vec<u16> = vec![1, 1, 0, 0];
+        let mut add = |id: u16, val: u16| {
+            keys.extend_from_slice(&[id, 0, 1, val]);
+        };
+        add(1024, 1); // GTModelType = projected
+        add(1025, 1); // GTRasterType = PixelIsArea
+        if epsg > 0 && epsg < 32767 {
+            add(3072, epsg as u16); // ProjectedCSType
+        } else {
+            add(3072, 32767); // user-defined
+        }
+        keys[3] = ((keys.len() - 4) / 4) as u16;
+        let strip_bytes = data.len() as u32;
+        let mut entries = vec![
+            E(256, 4, 1, (self.nx as u32).to_le_bytes().to_vec()),
+            E(257, 4, 1, (self.ny as u32).to_le_bytes().to_vec()),
+            E(258, 3, 1, u16b(&[32])),
+            E(259, 3, 1, u16b(&[1])),
+            E(262, 3, 1, u16b(&[1])),
+            E(273, 4, 1, Vec::new()), // StripOffsets, später gesetzt
+            E(277, 3, 1, u16b(&[1])),
+            E(278, 4, 1, (self.ny as u32).to_le_bytes().to_vec()),
+            E(279, 4, 1, strip_bytes.to_le_bytes().to_vec()),
+            E(339, 3, 1, u16b(&[3])), // SampleFormat = IEEE float
+            E(33550, 12, 3, f64b(&[self.cell, self.cell, 0.0])),
+            E(33922, 12, 6, f64b(&[0.0, 0.0, 0.0, self.x0, top, 0.0])),
+            E(34735, 3, keys.len() as u32, u16b(&keys)),
+            E(42113, 2, 8, b"-9999   ".to_vec()),
+        ];
+        entries.sort_by_key(|e| e.0);
+        let n = entries.len();
+        let ifd_off = 8usize;
+        let ifd_len = 2 + n * 12 + 4;
+        let mut extra_off = ifd_off + ifd_len;
+        // Bilddaten nach den Extras, daher zuerst Extras bestimmen
+        let mut placed: Vec<(u16, u16, u32, [u8; 4])> = Vec::new();
+        let mut strip_slot = None;
+        for (i, e) in entries.iter().enumerate() {
+            let mut val = [0u8; 4];
+            if e.0 == 273 {
+                strip_slot = Some(i);
+            } else if e.3.len() <= 4 {
+                val[..e.3.len()].copy_from_slice(&e.3);
+            } else {
+                val.copy_from_slice(&(extra_off as u32).to_le_bytes());
+                extra.extend_from_slice(&e.3);
+                extra_off += e.3.len();
+            }
+            placed.push((e.0, e.1, e.2, val));
+        }
+        let data_off = extra_off;
+        if let Some(i) = strip_slot {
+            placed[i].3 = (data_off as u32).to_le_bytes();
+        }
+        let mut out = Vec::with_capacity(data_off + data.len());
+        out.extend_from_slice(b"II");
+        out.extend_from_slice(&42u16.to_le_bytes());
+        out.extend_from_slice(&(ifd_off as u32).to_le_bytes());
+        out.extend_from_slice(&(n as u16).to_le_bytes());
+        for (tag, ty, cnt, val) in &placed {
+            out.extend_from_slice(&tag.to_le_bytes());
+            out.extend_from_slice(&ty.to_le_bytes());
+            out.extend_from_slice(&cnt.to_le_bytes());
+            out.extend_from_slice(val);
+        }
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&extra);
+        out.extend_from_slice(&data);
+        out
+    }
+
     /// Zellmitten als XYZ (nur gültige Zellen) – z. B. als Eingang für DGM-Programme.
     pub fn write_xyz(&self, path: &Path) -> Result<()> {
         let mut f = BufWriter::new(std::fs::File::create(path)?);

@@ -664,7 +664,7 @@ impl App {
         ui.add_space(6.0);
         ui.label(
             RichText::new(
-                "Ausgabe: dom.asc, dgm.asc (ESRI-ASCII-Grid), dgm.xyz, Normalbilder, Disparitätsbild. \
+                "Ausgabe: dom.asc, dgm.asc (ESRI-ASCII-Grid), dom.tif, dgm.tif (GeoTIFF), dgm.xyz, Normalbilder, Disparitätsbild. \
                  DGM = DOM mit progressivem morphologischem Bodenfilter; Fenster ≥ größte Gebäudeabmessung wählen.",
             )
             .small(),

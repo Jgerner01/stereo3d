@@ -501,6 +501,8 @@ pub fn products(p: &Project, d: &DenseResult, log: Log) -> Result<(Grid, Grid, S
     let dgm = dom.ground_filter(p.settings.dgm_window, p.settings.dgm_slope, p.settings.dgm_dh0, p.settings.dgm_dhmax);
     dom.write_ascii_grid(&out.join("dom.asc"))?;
     dgm.write_ascii_grid(&out.join("dgm.asc"))?;
+    dom.write_geotiff(&out.join("dom.tif"), p.settings.epsg)?;
+    dgm.write_geotiff(&out.join("dgm.tif"), p.settings.epsg)?;
     dgm.write_xyz(&out.join("dgm.xyz"))?;
     d.left_rect.save_png(&out.join("normalbild_links.png"))?;
     d.right_rect.save_png(&out.join("normalbild_rechts.png"))?;

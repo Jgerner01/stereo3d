@@ -67,6 +67,9 @@ pub struct Settings {
     pub lsm_half: usize,
     pub export_cloud: bool,
     pub out_dir: String,
+    /// EPSG-Code des Objektkoordinatensystems für GeoTIFF (0 = unbekannt/benutzerdefiniert)
+    #[serde(default)]
+    pub epsg: u32,
 }
 
 impl Default for Settings {
@@ -89,6 +92,7 @@ impl Default for Settings {
             lsm_half: 10,
             export_cloud: false,
             out_dir: "ergebnis".into(),
+            epsg: 0,
         }
     }
 }
