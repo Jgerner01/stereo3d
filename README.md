@@ -75,8 +75,9 @@ Laufzeit: Orientierung 0,3 s, dichte Zuordnung von 5 Mio. px ≈ 6 s (2 Kerne).
 - Mehrbildverbände (m ≥ 2, `[[images]]` in der Projektdatei) werden im Kern/CLI gemeinsam
   ausgeglichen (Verknüpfungspunkte zwischen aufeinanderfolgenden Bildern, Passpunkte über alle Bilder);
   die dichte Zuordnung und Einzelpunktmessung laufen weiterhin je Bildpaar (`--pair a b`).
-  Die GUI bearbeitet nur die ersten beiden Bilder; eine Mehrbild-Oberfläche und die Fusion
-  mehrerer Paare zu einem DOM fehlen noch.
+  In der GUI lassen sich Bilder hinzufügen/entfernen; über den beiden Ansichten wird das
+  aktive Bildpaar gewählt (Messung, Anaglyphe, DOM/DGM, Einzelpunkte beziehen sich darauf).
+  Die Fusion mehrerer Paare zu einem DOM fehlt noch.
 - Keine Simultankalibrierung: die innere Orientierung ist fest.
 - Das Raster liegt in der XY-Ebene. Für Fassaden wäre ein Raster in einer frei gewählten
   Bezugsebene nötig.

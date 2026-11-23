@@ -112,9 +112,16 @@ pub struct StoredOrientation {
     pub support_points: Vec<[f64; 3]>,
 }
 
+fn d_pair() -> [usize; 2] {
+    [0, 1]
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MeasuredPoint {
     pub id: String,
+    /// Bildpaar (0-basiert), in dem gemessen wurde: ul/vl in Bild pair[0], ur/vr in Bild pair[1]
+    #[serde(default = "d_pair")]
+    pub pair: [usize; 2],
     pub ul: f64,
     pub vl: f64,
     pub ur: f64,

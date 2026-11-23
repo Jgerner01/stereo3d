@@ -54,6 +54,8 @@ struct AnaPair {
     right: Gray,
     /// mittlere Parallaxe (Pixel des Vorschau-Normalbilds)
     d0: f32,
+    /// Bildpaar (0-basiert), aus dem die Normalbilder stammen
+    pair: (usize, usize),
 }
 
 struct DenseOut {
@@ -65,14 +67,18 @@ struct DenseOut {
 enum Job {
     Loaded(anyhow::Result<Vec<Gray>>),
     Oriented(anyhow::Result<(Oriented, String, AnaPair)>),
+    Ana(anyhow::Result<AnaPair>),
     Dense(anyhow::Result<DenseOut>),
 }
 
 struct App {
     project: Project,
     path: Option<PathBuf>,
-    imgs: Option<Arc<[Gray; 2]>>,
+    imgs: Option<Arc<Vec<Gray>>>,
+    /// zwei Ansichten (links/rechts); `shown` = Bildindizes, die sie zeigen (= aktives Bildpaar)
     views: [Viewer; 2],
+    shown: [usize; 2],
+    views_dirty: bool,
     big: Viewer,
     oriented: Option<Oriented>,
     report: String,
@@ -105,6 +111,8 @@ impl App {
             path: None,
             imgs: None,
             views: [Viewer::default(), Viewer::default()],
+            shown: [0, 1],
+            views_dirty: false,
             big: Viewer::default(),
             oriented: None,
             report: String::new(),
@@ -166,6 +174,9 @@ impl App {
                 self.project = pr;
                 self.path = Some(p.to_path_buf());
                 self.imgs = None;
+                self.shown = [0, 1];
+                self.last_result = None;
+                self.last_click = None;
                 self.ana = None;
                 self.dom = None;
                 self.report.clear();
@@ -224,9 +235,7 @@ impl App {
         self.job = None;
         match job {
             Job::Loaded(Ok(imgs)) => {
-                let Ok(imgs) = <[Gray; 2]>::try_from(imgs) else { return };
-                for k in 0..2 {
-                    self.views[k].set_image(ctx, &format!("bild{k}"), &imgs[k]);
+                for k in 0..imgs.len().min(self.project.images.len()) {
                     let c = &mut self.project.images[k].camera;
                     if c.width as usize != imgs[k].w || c.height as usize != imgs[k].h {
                         c.width = imgs[k].w as u32;
@@ -238,6 +247,8 @@ impl App {
                     }
                 }
                 self.imgs = Some(Arc::new(imgs));
+                self.clamp_shown();
+                self.refresh_views(ctx);
                 self.status = "Bilder geladen".into();
             }
             Job::Oriented(Ok((o, rep, ana))) => {
@@ -249,27 +260,96 @@ impl App {
                 self.ana_dirty = true;
                 self.status = "Orientierung berechnet".into();
             }
+            Job::Ana(Ok(ana)) => {
+                self.ana_shift = ana.d0;
+                self.ana = Some(ana);
+                self.ana_dirty = true;
+            }
             Job::Dense(Ok(d)) => {
                 self.dense_report = d.report;
                 self.dom = Some((d.dom, d.dgm));
                 self.big_dirty = true;
                 self.status = "DOM/DGM berechnet".into();
             }
-            Job::Loaded(Err(e)) | Job::Oriented(Err(e)) | Job::Dense(Err(e)) => {
+            Job::Loaded(Err(e)) | Job::Oriented(Err(e)) | Job::Ana(Err(e)) | Job::Dense(Err(e)) => {
                 self.status = format!("Fehler: {e:#}");
                 self.logf(self.status.clone());
             }
         }
     }
 
+    fn n_images(&self) -> usize {
+        self.project.images.len()
+    }
+
+    /// Orientierung liegt für alle Bilder des Projekts vor.
+    fn orient_ok(&self) -> bool {
+        self.oriented.as_ref().is_some_and(|o| o.poses.len() == self.n_images())
+    }
+
+    fn clamp_shown(&mut self) {
+        let n = self.n_images();
+        for s in self.shown.iter_mut() {
+            *s = (*s).min(n - 1);
+        }
+        if self.shown[0] == self.shown[1] && n > 1 {
+            self.shown[1] = (self.shown[0] + 1) % n;
+        }
+    }
+
+    fn refresh_views(&mut self, ctx: &egui::Context) {
+        if let Some(imgs) = self.imgs.clone() {
+            for side in 0..2 {
+                let k = self.shown[side];
+                if k < imgs.len() {
+                    self.views[side].set_image(ctx, &format!("bild{side}_{k}"), &imgs[k]);
+                }
+            }
+        }
+        self.views_dirty = false;
+    }
+
+    /// Nach Änderungen an der Bildliste: abgeleitete Ergebnisse verwerfen.
+    fn invalidate(&mut self) {
+        self.imgs = None;
+        self.oriented = None;
+        self.project.orientation = None;
+        self.ana = None;
+        self.dom = None;
+        self.last_result = None;
+        self.last_click = None;
+        self.report.clear();
+        self.dense_report.clear();
+        self.clamp_shown();
+    }
+
+    fn remove_image(&mut self, k: usize) {
+        self.project.images.remove(k);
+        self.project.marks.retain(|m| m.image != k);
+        for m in self.project.marks.iter_mut() {
+            if m.image > k {
+                m.image -= 1;
+            }
+        }
+        self.project.points.retain(|p| !p.pair.contains(&k));
+        for p in self.project.points.iter_mut() {
+            for x in p.pair.iter_mut() {
+                if *x > k {
+                    *x -= 1;
+                }
+            }
+        }
+        self.invalidate();
+    }
+
     fn start_load(&mut self, ctx: &egui::Context) {
         if self.project.images.iter().any(|i| i.path.is_empty()) {
             return;
         }
-        let paths = [self.project.resolve(&self.project.images[0].path), self.project.resolve(&self.project.images[1].path)];
+        let paths: Vec<PathBuf> = self.project.images.iter().map(|e| self.project.resolve(&e.path)).collect();
         self.spawn(ctx, move |log| {
             log("Bilder werden geladen …".into());
-            let r = (|| Ok(vec![Gray::load(&paths[0])?, Gray::load(&paths[1])?]))();
+            let r = paths.iter().map(|p| Gray::load(p)).collect::<anyhow::Result<Vec<_>>>();
             Job::Loaded(r)
         });
     }
@@ -279,23 +359,23 @@ impl App {
             self.status = "Zuerst Bilder laden".into();
             return;
         };
-        // Die GUI arbeitet mit den ersten beiden Bildern (Mehrbildverbände: CLI)
-        let p = self.project.pair(0, 1);
+        let p = self.project.clone();
+        let pair = (self.shown[0], self.shown[1]);
         self.spawn(ctx, move |log| {
-            let r = pipeline::orient(&p, &imgs[..], log).map(|(o, rep)| {
-                let cams = [p.images[0].camera.clone(), p.images[1].camera.clone()];
-                let s = (1800.0 / cams[0].width.max(cams[0].height) as f64).min(1.0);
-                let rect = Rectification::compute(&cams, &[o.poses[0].clone(), o.poses[1].clone()], s);
-                let (il, ir) = (rect.idx[0], rect.idx[1]);
-                let left = rect.resample(0, &cams[il], &o.poses[il], &imgs[il]);
-                let right = rect.resample(1, &cams[ir], &o.poses[ir], &imgs[ir]);
-                let ds: Vec<f64> = o.support.iter().filter_map(|x| rect.world_to_rect(x).map(|r| r.2)).collect();
-                let d0 = (ds.iter().sum::<f64>() / ds.len().max(1) as f64) as f32;
+            let r = pipeline::orient(&p, &imgs, log).and_then(|(o, rep)| {
+                let ana = make_ana(&p, &o, &imgs, pair)?;
                 log(format!("{rep}"));
-                (o, rep, AnaPair { left, right, d0 })
+                Ok((o, rep, ana))
             });
             Job::Oriented(r)
         });
+    }
+
+    fn start_ana(&mut self, ctx: &egui::Context) {
+        let (Some(imgs), Some(o)) = (self.imgs.clone(), self.oriented.clone()) else { return };
+        let p = self.project.clone();
+        let pair = (self.shown[0], self.shown[1]);
+        self.spawn(ctx, move |_| Job::Ana(make_ana(&p, &o, &imgs, pair)));
     }
 
     fn start_dense(&mut self, ctx: &egui::Context) {
@@ -304,10 +384,13 @@ impl App {
             return;
         };
         let p = self.project.clone();
+        let (i, j) = (self.shown[0], self.shown[1]);
         self.spawn(ctx, move |log| {
             let r = (|| {
-                let d = pipeline::dense(&p, &o, &imgs, log)?;
-                let (dom, dgm, rep) = pipeline::products(&p, &d, log)?;
+                let v = pipeline::pair_view(&p, &o, &imgs, i, j)?;
+                log(format!("Dichte Zuordnung für Bildpaar {}–{}", i + 1, j + 1));
+                let d = pipeline::dense(&v.project, &v.oriented, &v.imgs, log)?;
+                let (dom, dgm, rep) = pipeline::products(&v.project, &d, log)?;
                 Ok(DenseOut { report: rep, dom, dgm })
             })();
             Job::Dense(r)
@@ -399,7 +482,8 @@ impl App {
             ui.text_edit_singleline(&mut self.project.name);
         });
         ui.add_space(6.0);
-        for k in 0..2 {
+        let mut remove = None;
+        for k in 0..self.n_images() {
             ui.horizontal(|ui| {
                 ui.label(format!("Bild {}:", k + 1));
                 ui.text_edit_singleline(&mut self.project.images[k].path);
@@ -408,7 +492,19 @@ impl App {
                         self.project.images[k].path = p.to_string_lossy().into();
                     }
                 }
+                if self.n_images() > 2 && ui.small_button("x").on_hover_text("Bild entfernen").clicked() {
+                    remove = Some(k);
+                }
             });
+        }
+        if let Some(k) = remove {
+            self.remove_image(k);
+        }
+        if ui.button("+ Bild hinzufügen").clicked() {
+            let mut e = self.project.images.last().cloned().unwrap_or_default();
+            e.path.clear();
+            self.project.images.push(e);
+            self.invalidate();
         }
         if ui.add_enabled(!self.busy(), egui::Button::new("Bilder laden")).clicked() {
             self.start_load(ctx);
@@ -426,12 +522,13 @@ impl App {
              3. Modus „Passpunkt messen“: Punkt in der Liste wählen,\n   in beiden Bildern anklicken (Lupe beachten, Rechtsklick löscht)\n\
              4. Orientierung berechnen, Protokoll prüfen (σ0, Kontrollpunkte)\n\
              5. DOM/DGM berechnen\n\
-             6. Modus „Einzelpunkt messen“: Klick in Bild 1 oder 2,\n   Gegenpunkt per NCC+LSM; Rechtsklick im anderen Bild = Startwert",
+             6. Modus „Einzelpunkt messen“: Klick in der linken oder rechten Ansicht,\n   Gegenpunkt per NCC+LSM; Rechtsklick im anderen Bild = Startwert\n\
+             Mehrere Bilder: über den Ansichten das Bildpaar wählen; DOM/DGM, Anaglyphe und\n   Einzelpunkte beziehen sich auf dieses Paar, die Orientierung gilt für alle Bilder.",
         );
     }
 
     fn tab_kamera(&mut self, ui: &mut egui::Ui) {
-        for k in 0..2 {
+        for k in 0..self.n_images() {
             ui.label(RichText::new(format!("Kamera Bild {}", k + 1)).strong());
             let c = &mut self.project.images[k].camera;
             egui::Grid::new(format!("cam{k}")).num_columns(4).show(ui, |ui| {
@@ -464,8 +561,16 @@ impl App {
             });
             ui.add_space(6.0);
         }
-        if ui.button("Kamera 1 → Kamera 2 übernehmen").clicked() {
-            self.project.images[1].camera = self.project.images[0].camera.clone();
+        if ui.button("Kamera 1 → alle anderen übernehmen").clicked() {
+            let c = self.project.images[0].camera.clone();
+            for e in self.project.images.iter_mut().skip(1) {
+                let (w, h) = (e.camera.width, e.camera.height);
+                e.camera = c.clone();
+                if w > 0 && h > 0 {
+                    e.camera.width = w;
+                    e.camera.height = h;
+                }
+            }
         }
         ui.add_space(8.0);
         ui.label(
@@ -491,8 +596,8 @@ impl App {
                 ui.add(egui::DragValue::new(&mut v[3]).speed(0.001));
                 ui.end_row();
             });
-            if ui.button("Für beide Kameras übernehmen").clicked() {
-                for k in 0..2 {
+            if ui.button("Für alle Kameras übernehmen").clicked() {
+                for k in 0..self.project.images.len() {
                     let c = &self.project.images[k].camera;
                     let m = stereo3d::camera::Camera::from_metric(c.width, c.height, v[0], v[1], v[2], v[3]);
                     let c = &mut self.project.images[k].camera;
@@ -528,8 +633,9 @@ impl App {
         });
         ui.label(RichText::new("Auswahl → Modus „Passpunkt messen“ → in beiden Bildern klicken. K = Kontrollpunkt.").small());
         let mut remove = None;
+        let n_img = self.project.images.len();
         egui::Grid::new("gcps").striped(true).num_columns(9).show(ui, |ui| {
-            for h in ["", "Id", "X", "Y", "Z", "σxy", "σz", "K", "B1 B2"] {
+            for h in ["", "Id", "X", "Y", "Z", "σxy", "σz", "K", "Bilder"] {
                 ui.label(RichText::new(h).strong());
             }
             ui.end_row();
@@ -546,7 +652,7 @@ impl App {
                 ui.add(egui::DragValue::new(&mut g.sxy).speed(0.001).max_decimals(3));
                 ui.add(egui::DragValue::new(&mut g.sz).speed(0.001).max_decimals(3));
                 ui.checkbox(&mut g.check, "");
-                let m: String = (0..2).map(|k| if self.project.marks.iter().any(|m| m.id == g.id && m.image == k) { "B+ " } else { "-- " }).collect();
+                let m: String = (0..n_img).map(|k| if self.project.marks.iter().any(|m| m.id == g.id && m.image == k) { '+' } else { '-' }).collect();
                 ui.horizontal(|ui| {
                     ui.monospace(m);
                     if ui.small_button("x").on_hover_text("Punkt löschen").clicked() {
@@ -594,7 +700,7 @@ impl App {
                     ui.label(RichText::new(h).strong());
                 }
                 ui.end_row();
-                for k in 0..2 {
+                for k in 0..o.poses.len() {
                     let c = o.poses[k].c + o.offset;
                     let (om, ph, ka) = opk_from_r_cv(&o.poses[k].r);
                     ui.label(format!("{}", k + 1));
@@ -656,7 +762,7 @@ impl App {
             ui.checkbox(&mut s.export_cloud, "punktwolke.xyz");
             ui.end_row();
         });
-        if ui.add_enabled(!self.busy() && self.oriented.is_some(), egui::Button::new(RichText::new("DOM/DGM berechnen").strong())).clicked() {
+        if ui.add_enabled(!self.busy() && self.orient_ok(), egui::Button::new(RichText::new("DOM/DGM berechnen").strong())).clicked() {
             self.start_dense(ctx);
         }
         if !self.dense_report.is_empty() {
@@ -728,6 +834,7 @@ impl App {
 
     fn overlays(&self, k: usize) -> Vec<Overlay> {
         let mut v = Vec::new();
+        let side = if self.shown[0] == k { 0 } else { 1 };
         for m in self.project.marks.iter().filter(|m| m.image == k) {
             let check = self.project.gcps.iter().any(|g| g.id == m.id && g.check);
             let sel = self.sel_gcp.and_then(|i| self.project.gcps.get(i)).is_some_and(|g| g.id == m.id);
@@ -739,11 +846,17 @@ impl App {
             });
         }
         for p in &self.project.points {
-            let (u, vv) = if k == 0 { (p.ul, p.vl) } else { (p.ur, p.vr) };
+            let (u, vv) = if p.pair[0] == k {
+                (p.ul, p.vl)
+            } else if p.pair[1] == k {
+                (p.ur, p.vr)
+            } else {
+                continue;
+            };
             v.push(Overlay { pos: Pos2::new(u as f32, vv as f32), label: p.id.clone(), color: Color32::from_rgb(90, 255, 90), big: false });
         }
         if let Some(r) = &self.last_result {
-            v.push(Overlay { pos: Pos2::new(r.px[k].x as f32, r.px[k].y as f32), label: String::new(), color: Color32::from_rgb(255, 0, 255), big: true });
+            v.push(Overlay { pos: Pos2::new(r.px[side].x as f32, r.px[side].y as f32), label: String::new(), color: Color32::from_rgb(255, 0, 255), big: true });
         }
         v
     }
@@ -758,20 +871,47 @@ impl App {
 
     fn central_pair(&mut self, ui: &mut egui::Ui) {
         let avail = ui.available_size();
-        let size = Vec2::new((avail.x - 8.0) / 2.0, avail.y - 22.0);
+        let size = Vec2::new((avail.x - 8.0) / 2.0, avail.y - 28.0);
+        if self.views_dirty {
+            let ctx = ui.ctx().clone();
+            self.refresh_views(&ctx);
+        }
         let old = [(self.views[0].center, self.views[0].zoom), (self.views[1].center, self.views[1].zoom)];
         let mut outs = Vec::new();
+        let mut changed = false;
+        let n = self.n_images();
         ui.horizontal(|ui| {
-            for k in 0..2 {
+            for side in 0..2 {
                 ui.vertical(|ui| {
-                    ui.label(RichText::new(format!("Bild {}  {}", k + 1, self.project.images[k].path)).small());
+                    let k = self.shown[side];
+                    ui.horizontal(|ui| {
+                        if n > 2 {
+                            egui::ComboBox::from_id_salt(format!("sel{side}")).selected_text(format!("Bild {}", k + 1)).show_ui(ui, |ui| {
+                                for i in 0..n {
+                                    if i != self.shown[1 - side] && ui.selectable_value(&mut self.shown[side], i, format!("Bild {}", i + 1)).clicked() {
+                                        changed = true;
+                                    }
+                                }
+                            });
+                        } else {
+                            ui.label(RichText::new(format!("Bild {}", k + 1)).strong());
+                        }
+                        ui.label(RichText::new(&self.project.images[self.shown[side]].path).small());
+                    });
+                    let k = self.shown[side];
                     let ov = self.overlays(k);
                     let full = self.imgs.clone();
-                    let o = self.views[k].show(ui, &ov, full.as_ref().map(|g| &g[k]), size);
+                    let o = self.views[side].show(ui, &ov, full.as_ref().and_then(|g| g.get(k)), size);
                     outs.push(o);
                 });
             }
         });
+        if changed {
+            self.views_dirty = true;
+            self.last_result = None;
+            self.last_click = None;
+            ui.ctx().request_repaint();
+        }
         if self.link {
             for k in 0..2 {
                 if outs[k].moved {
@@ -794,7 +934,9 @@ impl App {
         }
     }
 
-    fn click(&mut self, k: usize, p: Pos2, secondary: bool) {
+    /// `side`: 0 = linke, 1 = rechte Ansicht
+    fn click(&mut self, side: usize, p: Pos2, secondary: bool) {
+        let k = self.shown[side];
         match self.mode {
             Mode::Navigieren => {}
             Mode::Passpunkt => {
@@ -810,8 +952,9 @@ impl App {
                     self.project.set_mark(&id, k, p.x as f64, p.y as f64);
                     self.status = format!("{id}: Bild {} gemessen ({:.1}, {:.1})", k + 1, p.x, p.y);
                     // nächsten Punkt ohne Messung in diesem Bild vorschlagen
-                    if self.project.mark(&id, 1 - k).is_some() {
-                        if let Some(n) = self.project.gcps.iter().position(|g| self.project.mark(&g.id, 0).is_none() || self.project.mark(&g.id, 1).is_none()) {
+                    let (i0, i1) = (self.shown[0], self.shown[1]);
+                    if self.project.mark(&id, self.shown[1 - side]).is_some() {
+                        if let Some(n) = self.project.gcps.iter().position(|g| self.project.mark(&g.id, i0).is_none() || self.project.mark(&g.id, i1).is_none()) {
                             self.sel_gcp = Some(n);
                         }
                     }
@@ -822,21 +965,34 @@ impl App {
                     self.status = "Zuerst orientieren".into();
                     return;
                 };
+                if !self.orient_ok() {
+                    self.status = "Orientierung passt nicht zu den Bildern – neu berechnen".into();
+                    return;
+                }
+                let (pi, pj) = (self.shown[0], self.shown[1]);
+                let view = match pipeline::pair_view(&self.project, o, imgs, pi, pj) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.status = format!("Einzelpunkt: {e:#}");
+                        return;
+                    }
+                };
                 let (a, ua, va, guess) = if secondary {
                     // Startwert im anderen Bild für die letzte Messung
                     let Some((a, ua, va)) = self.last_click else { return };
-                    if a == k {
+                    if a == side {
                         return;
                     }
                     (a, ua, va, Some(Vector2::new(p.x as f64, p.y as f64)))
                 } else {
-                    (k, p.x as f64, p.y as f64, None)
+                    (side, p.x as f64, p.y as f64, None)
                 };
-                match pipeline::measure_point(&self.project, o, imgs, a, ua, va, guess) {
+                match pipeline::measure_point(&view.project, &view.oriented, &view.imgs, a, ua, va, guess) {
                     Ok(r) => {
                         let replace = secondary && self.project.points.last().is_some();
                         let id = if replace { self.project.points.last().unwrap().id.clone() } else { format!("N{}", self.point_counter) };
-                        let m = pipeline::to_measured(&id, &r);
+                        let mut m = pipeline::to_measured(&id, &r);
+                        m.pair = [pi, pj];
                         if replace {
                             *self.project.points.last_mut().unwrap() = m;
                         } else {
@@ -861,10 +1017,14 @@ impl App {
     }
 
     fn central_anaglyph(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if self.ana.as_ref().is_some_and(|a| a.pair != (self.shown[0], self.shown[1])) && self.orient_ok() && !self.busy() {
+            self.start_ana(ctx);
+        }
         let Some(a) = &self.ana else {
             ui.label("Anaglyphe verfügbar nach der Orientierung (Normalbilder).");
             return;
         };
+        ui.label(format!("Bildpaar {}–{}", a.pair.0 + 1, a.pair.1 + 1));
         ui.horizontal(|ui| {
             ui.label("Parallaxe (Grundeinstellung) [px]");
             if ui.add(egui::Slider::new(&mut self.ana_shift, (a.d0 - 150.0)..=(a.d0 + 150.0))).changed() {
@@ -919,6 +1079,21 @@ impl App {
             }
         }
     }
+}
+
+/// Normalbilder eines Bildpaars für die Anaglyphe.
+fn make_ana(p: &Project, o: &Oriented, imgs: &[Gray], pair: (usize, usize)) -> anyhow::Result<AnaPair> {
+    let v = pipeline::pair_view(p, o, imgs, pair.0, pair.1)?;
+    let cams = [v.project.images[0].camera.clone(), v.project.images[1].camera.clone()];
+    let poses = [v.oriented.poses[0].clone(), v.oriented.poses[1].clone()];
+    let s = (1800.0 / cams[0].width.max(cams[0].height) as f64).min(1.0);
+    let rect = Rectification::compute(&cams, &poses, s);
+    let (il, ir) = (rect.idx[0], rect.idx[1]);
+    let left = rect.resample(0, &cams[il], &poses[il], &v.imgs[il]);
+    let right = rect.resample(1, &cams[ir], &poses[ir], &v.imgs[ir]);
+    let ds: Vec<f64> = o.support.iter().filter_map(|x| rect.world_to_rect(x).map(|r| r.2)).collect();
+    let d0 = (ds.iter().sum::<f64>() / ds.len().max(1) as f64) as f32;
+    Ok(AnaPair { left, right, d0, pair })
 }
 
 /// Schummerung + Höhenfarbe (Norden oben)

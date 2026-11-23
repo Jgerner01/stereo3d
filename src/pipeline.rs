@@ -705,6 +705,7 @@ pub fn measure_point(p: &Project, o: &Oriented, imgs: &[Gray; 2], a: usize, ua: 
 pub fn to_measured(id: &str, r: &PointResult) -> MeasuredPoint {
     MeasuredPoint {
         id: id.into(),
+        pair: [0, 1],
         ul: r.px[0].x,
         vl: r.px[0].y,
         ur: r.px[1].x,
@@ -721,12 +722,12 @@ pub fn to_measured(id: &str, r: &PointResult) -> MeasuredPoint {
 
 pub fn export_points(p: &Project, path: &std::path::Path) -> Result<()> {
     let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
-    writeln!(f, "Id;X;Y;Z;sX;sY;sZ;rho;u1;v1;u2;v2")?;
+    writeln!(f, "Id;X;Y;Z;sX;sY;sZ;rho;Bild1;u1;v1;Bild2;u2;v2")?;
     for m in &p.points {
         writeln!(
             f,
-            "{};{:.3};{:.3};{:.3};{:.4};{:.4};{:.4};{:.3};{:.2};{:.2};{:.2};{:.2}",
-            m.id, m.x, m.y, m.z, m.sx, m.sy, m.sz, m.rho, m.ul, m.vl, m.ur, m.vr
+            "{};{:.3};{:.3};{:.3};{:.4};{:.4};{:.4};{:.3};{};{:.2};{:.2};{};{:.2};{:.2}",
+            m.id, m.x, m.y, m.z, m.sx, m.sy, m.sz, m.rho, m.pair[0] + 1, m.ul, m.vl, m.pair[1] + 1, m.ur, m.vr
         )?;
     }
     Ok(())
