@@ -71,7 +71,7 @@ enum Job {
 struct App {
     project: Project,
     path: Option<PathBuf>,
-    imgs: Option<Arc<Vec<Gray>>>,
+    imgs: Option<Arc<[Gray; 2]>>,
     views: [Viewer; 2],
     big: Viewer,
     oriented: Option<Oriented>,
@@ -224,6 +224,7 @@ impl App {
         self.job = None;
         match job {
             Job::Loaded(Ok(imgs)) => {
+                let Ok(imgs) = <[Gray; 2]>::try_from(imgs) else { return };
                 for k in 0..2 {
                     self.views[k].set_image(ctx, &format!("bild{k}"), &imgs[k]);
                     let c = &mut self.project.images[k].camera;
@@ -281,10 +282,10 @@ impl App {
         // Die GUI arbeitet mit den ersten beiden Bildern (Mehrbildverbände: CLI)
         let p = self.project.pair(0, 1);
         self.spawn(ctx, move |log| {
-            let r = pipeline::orient(&p, &imgs[..2], log).map(|(o, rep)| {
+            let r = pipeline::orient(&p, &imgs[..], log).map(|(o, rep)| {
                 let cams = [p.images[0].camera.clone(), p.images[1].camera.clone()];
                 let s = (1800.0 / cams[0].width.max(cams[0].height) as f64).min(1.0);
-                let rect = Rectification::compute(&cams, &o.poses, s);
+                let rect = Rectification::compute(&cams, &[o.poses[0].clone(), o.poses[1].clone()], s);
                 let (il, ir) = (rect.idx[0], rect.idx[1]);
                 let left = rect.resample(0, &cams[il], &o.poses[il], &imgs[il]);
                 let right = rect.resample(1, &cams[ir], &o.poses[ir], &imgs[ir]);
