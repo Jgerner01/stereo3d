@@ -10,6 +10,9 @@ fn synthetic_pair_full_pipeline() {
     let imgs = pipeline::load_images(&p).unwrap();
     let quiet = |_: String| {};
     let (o, rep) = pipeline::orient(&p, &imgs, &quiet).unwrap();
+    assert_eq!(o.poses.len(), 2);
+    let v = pipeline::pair_view(&p, &o, &imgs, 0, 1).unwrap();
+    let imgs = v.imgs.clone();
     assert!(rep.contains("σ0"), "Protokoll fehlt");
 
     // Kontrollpunkte: Vorwärtsschnitt gegen Soll
@@ -48,4 +51,31 @@ fn synthetic_pair_full_pipeline() {
     for f in ["dom.asc", "dgm.asc", "dom.tif", "dgm.tif", "dgm.xyz"] {
         assert!(out.join(f).exists(), "{f} fehlt");
     }
+}
+
+#[test]
+fn synthetic_strip_of_three_images() {
+    let dir = std::env::temp_dir().join("stereo3d_e2e_test3");
+    let _ = std::fs::remove_dir_all(&dir);
+    let proj = synth::generate_with(&dir, 3).unwrap();
+    let p = Project::load(&proj).unwrap();
+    assert_eq!(p.images.len(), 3);
+    let imgs = pipeline::load_images(&p).unwrap();
+    let quiet = |_: String| {};
+    let (o, rep) = pipeline::orient(&p, &imgs, &quiet).unwrap();
+    assert_eq!(o.poses.len(), 3);
+    assert_eq!(o.cov.nrows(), 18);
+    assert!(rep.contains("vx3"), "Protokoll soll alle drei Bilder führen");
+    assert!(o.sigma0 < 1.0, "σ0 = {}", o.sigma0);
+    // Kontrollpunkte über das äußere Paar (Bild 1/3 = Basis des Stereopaars)
+    let v = pipeline::pair_view(&p, &o, &imgs, 0, 2).unwrap();
+    for g in p.gcps.iter().filter(|g| g.check) {
+        let Some(m) = v.project.mark(&g.id, 0) else { continue };
+        if v.project.mark(&g.id, 1).is_none() { continue; }
+        let r = pipeline::measure_point(&v.project, &v.oriented, &v.imgs, 0, m.u, m.v, None).unwrap();
+        assert!((r.xyz.x - g.x).abs() < 0.3 && (r.xyz.y - g.y).abs() < 0.3 && (r.xyz.z - g.z).abs() < 0.8, "{}: {:?}", g.id, r.xyz);
+    }
+    // Speichern/Laden der Orientierung erhält alle Bilder
+    let back = pipeline::Oriented::from_stored(&o.to_stored());
+    assert_eq!(back.poses.len(), 3);
 }

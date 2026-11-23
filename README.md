@@ -32,7 +32,7 @@ Nur den Rechenkern ohne GUI bauen: `cargo build --release --no-default-features`
 5. **DOM/DGM**: Epipolarnormalisierung, Census-SGM (8 Pfade, hierarchisch, gekachelt,
    LR-Prüfung, Subpixel-Interpolation, Median- und Speckle-Filter), Vorwärtsschnitt,
    Rasterung (Median je Zelle), progressiver morphologischer Bodenfilter.
-   Ausgabe: `dom.asc`, `dgm.asc` (ESRI-ASCII-Grid), `dgm.xyz`, auf Wunsch `punktwolke.xyz`,
+   Ausgabe: `dom.asc`, `dgm.asc` (ESRI-ASCII-Grid), `dom.tif`, `dgm.tif` (GeoTIFF, Float32; EPSG-Code über `settings.epsg` in der Projektdatei), `dgm.xyz`, auf Wunsch `punktwolke.xyz`,
    Normalbilder und Disparitätsbild.
 6. **Einzelpunkte**: Klick in Bild 1 oder 2 → Gegenpunkt per NCC entlang der Epipolarlinie,
    Feinzuordnung per LSM (affin + radiometrisch), Vorwärtsschnitt mit
@@ -47,8 +47,10 @@ Parallaxe einstellbar) sowie DOM/DGM als Schummerung mit Koordinatenanzeige.
 
 ```
 stereo3d-cli synth testdaten                      # synthetisches Luftbildpaar erzeugen
+stereo3d-cli synth streifen --images 3            # Bildverband aus 3 Bildern
 stereo3d-cli run testdaten/projekt.toml --check   # komplette Auswertung + Soll-Ist
-stereo3d-cli measure projekt.toml 1 1234.5 876.2  # Einzelpunkt aus Bild 1
+stereo3d-cli run streifen/projekt.toml --pair 1 3 # alle Bilder orientieren, SGM/DOM für Paar 1–3
+stereo3d-cli measure projekt.toml 1 1234.5 876.2  # Einzelpunkt aus Bild 1 (Paar 1–2)
 ```
 
 ## Prüfung (synthetisches Luftbildpaar)
@@ -70,12 +72,15 @@ Laufzeit: Orientierung 0,3 s, dichte Zuordnung von 5 Mio. px ≈ 6 s (2 Kerne).
 
 ## Grenzen / mögliche Erweiterungen
 
-- Nur zwei Bilder; die Ausgleichung ist bereits für m Bilder ausgelegt, Bildverbände
-  sind daher eine überschaubare Erweiterung.
+- Mehrbildverbände (m ≥ 2, `[[images]]` in der Projektdatei) werden im Kern/CLI gemeinsam
+  ausgeglichen (Verknüpfungspunkte zwischen aufeinanderfolgenden Bildern, Passpunkte über alle Bilder);
+  die dichte Zuordnung und Einzelpunktmessung laufen weiterhin je Bildpaar (`--pair a b`).
+  Die GUI bearbeitet nur die ersten beiden Bilder; eine Mehrbild-Oberfläche und die Fusion
+  mehrerer Paare zu einem DOM fehlen noch.
 - Keine Simultankalibrierung: die innere Orientierung ist fest.
 - Das Raster liegt in der XY-Ebene. Für Fassaden wäre ein Raster in einer frei gewählten
   Bezugsebene nötig.
 - Die SGM-Subpixelinterpolation (Parabel) hat einen bekannten Pixel-Locking-Effekt.
   Eine LSM-Verfeinerung je Pixel würde die Genauigkeit weiter steigern, kostet aber Rechenzeit.
-- Die Ausgabe erfolgt als ASCII-Grid und nicht als GeoTIFF. Der Lagebezug wird über die
-  Passpunktkoordinaten hergestellt.
+- GeoTIFF ist unkomprimiert und ohne Pyramiden; der Lagebezug folgt den Passpunktkoordinaten
+  (EPSG-Code muss selbst eingetragen werden).

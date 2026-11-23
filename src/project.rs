@@ -103,9 +103,9 @@ pub struct StoredOrientation {
     /// Reduktion (Schwerpunkt der Passpunkte)
     pub offset: [f64; 3],
     /// je Bild: Projektionszentrum (reduziert) und Rotation Welt→Kamera (zeilenweise)
-    pub c: [[f64; 3]; 2],
-    pub r: [[f64; 9]; 2],
-    /// Kovarianz der Orientierungsparameter (12×12, zeilenweise)
+    pub c: Vec<[f64; 3]>,
+    pub r: Vec<[f64; 9]>,
+    /// Kovarianz der Orientierungsparameter (6m × 6m, zeilenweise)
     pub cov: Vec<f64>,
     pub sigma0: f64,
     /// Objektpunkte (reduziert) zur Ableitung des Tiefenbereichs
@@ -128,10 +128,11 @@ pub struct MeasuredPoint {
     pub rho: f64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project {
     pub name: String,
-    pub images: [ImageEntry; 2],
+    /// Bilder (mindestens 2); Passpunktmessungen verweisen per Index (0-basiert) darauf
+    pub images: Vec<ImageEntry>,
     #[serde(default)]
     pub gcps: Vec<Gcp>,
     #[serde(default)]
@@ -147,11 +148,46 @@ pub struct Project {
     pub base_dir: PathBuf,
 }
 
+impl Default for Project {
+    fn default() -> Self {
+        Project {
+            name: String::new(),
+            images: vec![ImageEntry::default(), ImageEntry::default()],
+            gcps: Vec::new(),
+            marks: Vec::new(),
+            settings: Settings::default(),
+            orientation: None,
+            points: Vec::new(),
+            base_dir: PathBuf::new(),
+        }
+    }
+}
+
 impl Project {
+    /// Teilprojekt aus den Bildern `i` und `j` (als Bild 0 und 1); Messungen werden umnummeriert.
+    /// Die gespeicherte Orientierung entfällt (gilt nur für das Gesamtprojekt).
+    pub fn pair(&self, i: usize, j: usize) -> Project {
+        let mut p = self.clone();
+        p.images = vec![self.images[i].clone(), self.images[j].clone()];
+        p.marks = self
+            .marks
+            .iter()
+            .filter_map(|m| {
+                let k = if m.image == i { 0 } else if m.image == j { 1 } else { return None };
+                Some(Mark { image: k, ..m.clone() })
+            })
+            .collect();
+        p.orientation = None;
+        p
+    }
+
     pub fn load(path: &Path) -> Result<Project> {
         let s = std::fs::read_to_string(path).with_context(|| format!("{}", path.display()))?;
         let mut p: Project = toml::from_str(&s).context("Projektdatei fehlerhaft")?;
         p.base_dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        while p.images.len() < 2 {
+            p.images.push(ImageEntry::default());
+        }
         Ok(p)
     }
 

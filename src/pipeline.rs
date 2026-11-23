@@ -20,7 +20,8 @@ pub type Log<'a> = &'a (dyn Fn(String) + Sync);
 #[derive(Clone, Debug)]
 pub struct Oriented {
     pub offset: Vector3<f64>,
-    pub poses: [Pose; 2],
+    /// Äußere Orientierung je Bild (reduzierte Koordinaten)
+    pub poses: Vec<Pose>,
     pub cov: DMatrix<f64>,
     pub sigma0: f64,
     pub support: Vec<Vector3<f64>>,
@@ -39,8 +40,8 @@ impl Oriented {
         };
         StoredOrientation {
             offset: self.offset.into(),
-            c: [self.poses[0].c.into(), self.poses[1].c.into()],
-            r: [rr(&self.poses[0].r), rr(&self.poses[1].r)],
+            c: self.poses.iter().map(|p| p.c.into()).collect(),
+            r: self.poses.iter().map(|p| rr(&p.r)).collect(),
             cov: self.cov.transpose().as_slice().to_vec(),
             sigma0: self.sigma0,
             support_points: self.support.iter().map(|p| (*p).into()).collect(),
@@ -51,31 +52,47 @@ impl Oriented {
         let n = (s.cov.len() as f64).sqrt() as usize;
         Oriented {
             offset: Vector3::from(s.offset),
-            poses: [pose(0), pose(1)],
+            poses: (0..s.c.len()).map(pose).collect(),
             cov: DMatrix::from_row_slice(n, n, &s.cov),
             sigma0: s.sigma0,
             support: s.support_points.iter().map(|p| Vector3::from(*p)).collect(),
         }
     }
+
+    /// Orientierung des Bildpaars (i, j) als Zwei-Bild-Orientierung (Kovarianz der beiden Bilder).
+    pub fn pair(&self, i: usize, j: usize) -> Oriented {
+        let idx = [i, j];
+        let cov = DMatrix::from_fn(12, 12, |r, c| self.cov[(6 * idx[r / 6] + r % 6, 6 * idx[c / 6] + c % 6)]);
+        Oriented { offset: self.offset, poses: vec![self.poses[i].clone(), self.poses[j].clone()], cov, sigma0: self.sigma0, support: self.support.clone() }
+    }
 }
 
-pub fn load_images(p: &Project) -> Result<[Gray; 2]> {
-    let a = Gray::load(&p.resolve(&p.images[0].path))?;
-    let b = Gray::load(&p.resolve(&p.images[1].path))?;
-    for (k, g) in [&a, &b].iter().enumerate() {
-        let c = &p.images[k].camera;
-        if c.width as usize != g.w || c.height as usize != g.h {
-            bail!(
-                "Bild {}: Größe {}×{} passt nicht zur Kamera ({}×{})",
-                k + 1,
-                g.w,
-                g.h,
-                c.width,
-                c.height
-            );
-        }
+/// Bildpaar eines Mehrbildprojekts: Teilprojekt, Zwei-Bild-Orientierung und Bilder.
+/// Damit laufen `dense`, `products` und `measure_point` auf jedem Paar eines Verbands.
+pub struct PairView {
+    pub project: Project,
+    pub oriented: Oriented,
+    pub imgs: [Gray; 2],
+}
+
+pub fn pair_view(p: &Project, o: &Oriented, imgs: &[Gray], i: usize, j: usize) -> Result<PairView> {
+    if i == j || i >= o.poses.len() || j >= o.poses.len() || j >= imgs.len() || i >= imgs.len() {
+        bail!("Ungültiges Bildpaar ({}, {}) bei {} Bildern", i + 1, j + 1, o.poses.len());
     }
-    Ok([a, b])
+    Ok(PairView { project: p.pair(i, j), oriented: o.pair(i, j), imgs: [imgs[i].clone(), imgs[j].clone()] })
+}
+
+pub fn load_images(p: &Project) -> Result<Vec<Gray>> {
+    let mut v = Vec::new();
+    for (k, e) in p.images.iter().enumerate() {
+        let g = Gray::load(&p.resolve(&e.path))?;
+        let c = &e.camera;
+        if c.width as usize != g.w || c.height as usize != g.h {
+            bail!("Bild {}: Größe {}×{} passt nicht zur Kamera ({}×{})", k + 1, g.w, g.h, c.width, c.height);
+        }
+        v.push(g);
+    }
+    Ok(v)
 }
 
 fn cams(p: &Project) -> [Camera; 2] {
@@ -142,8 +159,14 @@ fn refine_lsm(
 // Orientierung
 // ---------------------------------------------------------------------------
 
-pub fn orient(p: &Project, imgs: &[Gray; 2], log: Log) -> Result<(Oriented, String)> {
-    let cams = cams(p);
+/// Orientierung aller Bilder des Projekts (m ≥ 2). Verknüpfungspunkte werden zwischen
+/// aufeinanderfolgenden Bildern (k, k+1) gesucht; die Passpunkte verbinden den gesamten Verband.
+pub fn orient(p: &Project, imgs: &[Gray], log: Log) -> Result<(Oriented, String)> {
+    let m = p.images.len();
+    if m < 2 || imgs.len() != m {
+        bail!("Bildanzahl ({}) passt nicht zum Projekt ({})", imgs.len(), m);
+    }
+    let cams: Vec<Camera> = p.images.iter().map(|e| e.camera.clone()).collect();
     let ctrl: Vec<_> = p.gcps.iter().filter(|g| !g.check).collect();
     if ctrl.len() < 3 {
         bail!("Mindestens 3 Passpunkte (besser ≥ 5) erforderlich");
@@ -153,7 +176,7 @@ pub fn orient(p: &Project, imgs: &[Gray; 2], log: Log) -> Result<(Oriented, Stri
 
     // 1. Rückwärtsschnitte
     let mut poses: Vec<Pose> = Vec::new();
-    for k in 0..2 {
+    for k in 0..m {
         let mut xn = Vec::new();
         let mut xw = Vec::new();
         for g in &ctrl {
@@ -162,24 +185,34 @@ pub fn orient(p: &Project, imgs: &[Gray; 2], log: Log) -> Result<(Oriented, Stri
                 xw.push(red(g));
             }
         }
+        if xn.len() < 3 {
+            bail!("Bild {}: nur {} Passpunktmessungen (mindestens 3 erforderlich)", k + 1, xn.len());
+        }
         let pose = adjust::resection_init(&xn, &xw)?;
         let (_, rms) = adjust::resection_refine(pose.clone(), &xn, &xw)?;
         log(format!("Rückwärtsschnitt Bild {}: {} Passpunkte, RMS {:.2} px", k + 1, xn.len(), rms * cams[k].f_mean()));
         poses.push(pose);
     }
-    let mut poses2 = [poses[0].clone(), poses[1].clone()];
+    let mut poses2 = poses;
 
-    // 2. Verknüpfungspunkte
+    // 2. Verknüpfungspunkte je Bildpaar (k, k+1)
     let ctrl_pts: Vec<Vector3<f64>> = ctrl.iter().map(|g| red(g)).collect();
-    let ties = tie_points(p, &cams, &poses2, imgs, &ctrl_pts, log)?;
-    log(format!("Verknüpfungspunkte: {}", ties.len()));
+    let mut ties: Vec<(usize, usize, [Vector2<f64>; 2])> = Vec::new();
+    for k in 0..m - 1 {
+        let pair_cams = [cams[k].clone(), cams[k + 1].clone()];
+        let pair_poses = [poses2[k].clone(), poses2[k + 1].clone()];
+        let pair_imgs = [imgs[k].clone(), imgs[k + 1].clone()];
+        let t = tie_points(p, &pair_cams, &pair_poses, &pair_imgs, &ctrl_pts, log)?;
+        log(format!("Verknüpfungspunkte Bild {}–{}: {}", k + 1, k + 2, t.len()));
+        ties.extend(t.into_iter().map(|x| (k, k + 1, x)));
+    }
 
     // 3. Bündelausgleich
     let mut points = Vec::new();
     let mut priors = Vec::new();
     let mut obs = Vec::new();
     for g in &ctrl {
-        let marks: Vec<_> = (0..2).filter_map(|k| p.mark(&g.id, k)).collect();
+        let marks: Vec<_> = (0..m).filter_map(|k| p.mark(&g.id, k)).collect();
         if marks.is_empty() {
             continue;
         }
@@ -191,18 +224,18 @@ pub fn orient(p: &Project, imgs: &[Gray; 2], log: Log) -> Result<(Oriented, Stri
         }
     }
     let n_ctrl = points.len();
-    for t in &ties {
-        let xa = cams[0].pixel_to_norm(t[0].x, t[0].y);
-        let xb = cams[1].pixel_to_norm(t[1].x, t[1].y);
-        let Some(x) = adjust::midpoint(&[&poses2[0], &poses2[1]], &[xa, xb]) else { continue };
+    for (ia, ib, t) in &ties {
+        let xa = cams[*ia].pixel_to_norm(t[0].x, t[0].y);
+        let xb = cams[*ib].pixel_to_norm(t[1].x, t[1].y);
+        let Some(x) = adjust::midpoint(&[&poses2[*ia], &poses2[*ib]], &[xa, xb]) else { continue };
         let j = points.len();
         points.push(x);
         priors.push(None);
-        obs.push(Obs { img: 0, pt: j, xn: xa, sigma: p.settings.tie_sigma_px / cams[0].f_mean() });
-        obs.push(Obs { img: 1, pt: j, xn: xb, sigma: p.settings.tie_sigma_px / cams[1].f_mean() });
+        obs.push(Obs { img: *ia, pt: j, xn: xa, sigma: p.settings.tie_sigma_px / cams[*ia].f_mean() });
+        obs.push(Obs { img: *ib, pt: j, xn: xb, sigma: p.settings.tie_sigma_px / cams[*ib].f_mean() });
     }
     let res = adjust::bundle_adjust(&poses2, &points, &priors, &obs, &BundleOptions::default())?;
-    poses2 = [res.poses[0].clone(), res.poses[1].clone()];
+    poses2 = res.poses.clone();
     let n_rej = res.rejected.iter().filter(|r| **r).count();
     log(format!("Bündelausgleich: σ0 = {:.3}, Redundanz {}, verworfen {}", res.sigma0, res.redundancy, n_rej));
 
@@ -214,7 +247,7 @@ pub fn orient(p: &Project, imgs: &[Gray; 2], log: Log) -> Result<(Oriented, Stri
     let _ = writeln!(rep, "Redundanz r = {}, Iterationen {}\n", res.redundancy, res.iterations);
     let _ = writeln!(rep, "Äußere Orientierung (ω, φ, κ photogrammetrisch, gon):");
     let _ = writeln!(rep, "{:>4} {:>14} {:>14} {:>11} {:>10} {:>10} {:>10} | σX0[m] σY0[m] σZ0[m] σω[mgon] σφ[mgon] σκ[mgon]", "Bild", "X0", "Y0", "Z0", "ω", "φ", "κ");
-    for k in 0..2 {
+    for k in 0..m {
         let ps = &poses2[k];
         let (om, ph, ka) = opk_from_r_cv(&ps.r);
         let cc = ps.c + offset;
@@ -238,14 +271,18 @@ pub fn orient(p: &Project, imgs: &[Gray; 2], log: Log) -> Result<(Oriented, Stri
         );
     }
     let _ = writeln!(rep, "\nPasspunkte – Verbesserungen Objekt [m] und Bild [px]:");
-    let _ = writeln!(rep, "{:>8} {:>8} {:>8} {:>8} | {:>7} {:>7} {:>7} {:>7}", "Id", "vX", "vY", "vZ", "vx1", "vy1", "vx2", "vy2");
+    let mut head = format!("{:>8} {:>8} {:>8} {:>8} |", "Id", "vX", "vY", "vZ");
+    for k in 0..m {
+        head.push_str(&format!(" {:>7} {:>7}", format!("vx{}", k + 1), format!("vy{}", k + 1)));
+    }
+    let _ = writeln!(rep, "{head}");
     let mut j = 0;
     for g in &ctrl {
-        if !(0..2).any(|k| p.mark(&g.id, k).is_some()) {
+        if !(0..m).any(|k| p.mark(&g.id, k).is_some()) {
             continue;
         }
         let v = res.points[j] - red(g);
-        let mut img_res = [f64::NAN; 4];
+        let mut img_res = vec![f64::NAN; 2 * m];
         for (i, o) in obs.iter().enumerate() {
             if o.pt == j {
                 let f = cams[o.img].f_mean();
@@ -253,7 +290,11 @@ pub fn orient(p: &Project, imgs: &[Gray; 2], log: Log) -> Result<(Oriented, Stri
                 img_res[2 * o.img + 1] = res.residuals[i].y * f;
             }
         }
-        let _ = writeln!(rep, "{:>8} {:>8.3} {:>8.3} {:>8.3} | {:>7.2} {:>7.2} {:>7.2} {:>7.2}", g.id, v.x, v.y, v.z, img_res[0], img_res[1], img_res[2], img_res[3]);
+        let mut line = format!("{:>8} {:>8.3} {:>8.3} {:>8.3} |", g.id, v.x, v.y, v.z);
+        for r in &img_res {
+            line.push_str(&format!(" {:>7.2}", r));
+        }
+        let _ = writeln!(rep, "{line}");
         j += 1;
     }
     // Restparallaxen Verknüpfungspunkte
@@ -282,8 +323,7 @@ pub fn orient(p: &Project, imgs: &[Gray; 2], log: Log) -> Result<(Oriented, Stri
         let _ = writeln!(rep, "{:>8} {:>8} {:>8} {:>8} | {:>7} {:>7} {:>7}", "Id", "dX", "dY", "dZ", "σX", "σY", "σZ");
         let (mut sx, mut sy, mut sz, mut n) = (0.0, 0.0, 0.0, 0);
         for g in checks {
-            let (Some(a), Some(b)) = (p.mark(&g.id, 0), p.mark(&g.id, 1)) else { continue };
-            let Some(it) = intersect_px(&cams, &ori, [a.u, a.v], [b.u, b.v], [p.settings.sigma_px; 2]) else { continue };
+            let Some(it) = intersect_all(p, &cams, &ori, &g.id) else { continue };
             let d = it.x - red(g);
             let _ = writeln!(
                 rep,
@@ -336,6 +376,27 @@ fn opk_sigma(pose: &Pose, cov: &DMatrix<f64>, k: usize) -> [f64; 6] {
         cov[(6 * k + 4, 6 * k + 4)].sqrt(),
         cov[(6 * k + 5, 6 * k + 5)].sqrt(),
     ]
+}
+
+/// Zwei-Bild-Orientierung für die paarweisen Funktionen; Mehrbildverbände über `pair_view` zerlegen.
+fn pair_poses(o: &Oriented) -> Result<[Pose; 2]> {
+    match o.poses.as_slice() {
+        [a, b] => Ok([a.clone(), b.clone()]),
+        _ => bail!("Paarweise Funktion benötigt eine Zwei-Bild-Orientierung – pipeline::pair_view(...) verwenden"),
+    }
+}
+
+/// Vorwärtsschnitt eines Punkts aus allen Bildern mit Messung (mindestens 2); Ergebnis reduziert.
+fn intersect_all(p: &Project, cams: &[Camera], o: &Oriented, id: &str) -> Option<adjust::Intersection> {
+    let ms: Vec<&crate::project::Mark> = (0..cams.len()).filter_map(|k| p.mark(id, k)).collect();
+    if ms.len() < 2 {
+        return None;
+    }
+    let poses: Vec<&Pose> = ms.iter().map(|m| &o.poses[m.image]).collect();
+    let idx: Vec<usize> = ms.iter().map(|m| m.image).collect();
+    let xn: Vec<Vector2<f64>> = ms.iter().map(|m| cams[m.image].pixel_to_norm(m.u, m.v)).collect();
+    let sg: Vec<f64> = ms.iter().map(|m| p.settings.sigma_px / cams[m.image].f_mean()).collect();
+    adjust::intersect(&poses, &idx, &xn, &sg, Some(&o.cov))
 }
 
 /// Vorwärtsschnitt aus Originalpixeln beider Bilder (Ergebnis reduziert).
@@ -455,14 +516,15 @@ pub struct DenseResult {
 }
 
 pub fn dense(p: &Project, o: &Oriented, imgs: &[Gray; 2], log: Log) -> Result<DenseResult> {
+    let poses = pair_poses(o)?;
     let cams = cams(p);
     let s = p.settings.dense_scale.clamp(0.05, 1.0);
-    let rect = Rectification::compute(&cams, &o.poses, s);
+    let rect = Rectification::compute(&cams, &poses, s);
     let (il, ir) = (rect.idx[0], rect.idx[1]);
     log(format!("Normalbilder {}×{} / {}×{} px (Maßstab {:.2})", rect.size[0].0, rect.size[0].1, rect.size[1].0, rect.size[1].1, s));
-    let left = rect.resample(0, &cams[il], &o.poses[il], &imgs[il]);
-    let right = rect.resample(1, &cams[ir], &o.poses[ir], &imgs[ir]);
-    let mask = rect.valid_mask(0, &cams[il], &o.poses[il]);
+    let left = rect.resample(0, &cams[il], &poses[il], &imgs[il]);
+    let right = rect.resample(1, &cams[ir], &poses[ir], &imgs[ir]);
+    let mask = rect.valid_mask(0, &cams[il], &poses[il]);
     let Some((dmin, dmax)) = disp_range(&rect, &o.support, p.settings.depth_margin) else {
         bail!("Tiefenbereich nicht bestimmbar");
     };
@@ -569,15 +631,16 @@ pub struct PointResult {
 
 /// Punkt in Bild `a` (Originalpixel) messen; Gegenpunkt automatisch (oder ab Startwert `guess`).
 pub fn measure_point(p: &Project, o: &Oriented, imgs: &[Gray; 2], a: usize, ua: f64, va: f64, guess: Option<Vector2<f64>>) -> Result<PointResult> {
+    let poses = pair_poses(o)?;
     let cams = cams(p);
     let b = 1 - a;
-    let rect = Rectification::compute(&cams, &o.poses, 1.0);
+    let rect = Rectification::compute(&cams, &poses, 1.0);
     let side_a = if rect.idx[0] == a { 0 } else { 1 };
     let side_b = 1 - side_a;
-    let Some(ra) = rect.orig_to_rect(side_a, &cams[a], &o.poses[a], ua, va) else { bail!("Punkt nicht abbildbar") };
+    let Some(ra) = rect.orig_to_rect(side_a, &cams[a], &poses[a], ua, va) else { bail!("Punkt nicht abbildbar") };
     let half = p.settings.lsm_half.max(4);
     let (ub0, vb0) = if let Some(g) = guess {
-        let Some(rb) = rect.orig_to_rect(side_b, &cams[b], &o.poses[b], g.x, g.y) else { bail!("Startwert nicht abbildbar") };
+        let Some(rb) = rect.orig_to_rect(side_b, &cams[b], &poses[b], g.x, g.y) else { bail!("Startwert nicht abbildbar") };
         (rb.x, rb.y)
     } else {
         let Some((dmin, dmax)) = disp_range(&rect, &o.support, p.settings.depth_margin.max(0.5)) else { bail!("Tiefenbereich unbekannt") };
@@ -592,9 +655,9 @@ pub fn measure_point(p: &Project, o: &Oriented, imgs: &[Gray; 2], a: usize, ua: 
         let sv0 = ra.y.round() as isize - h - vy;
         let sw = (u_hi - u_lo).ceil() as usize + 2 * half + 3;
         let sh = 2 * half + 1 + 2 * vy as usize;
-        let strip = rect_patch(&rect, side_b, &cams[b], &o.poses[b], &imgs[b], su0, sv0, sw, sh);
+        let strip = rect_patch(&rect, side_b, &cams[b], &poses[b], &imgs[b], su0, sv0, sw, sh);
         let ta0 = (ra.x.round() as isize - h, ra.y.round() as isize - h);
-        let tpl = rect_patch(&rect, side_a, &cams[a], &o.poses[a], &imgs[a], ta0.0, ta0.1, 2 * half + 1, 2 * half + 1);
+        let tpl = rect_patch(&rect, side_a, &cams[a], &poses[a], &imgs[a], ta0.0, ta0.1, 2 * half + 1, 2 * half + 1);
         let mut best = (-2f32, 0isize, 0isize);
         let mut all = Vec::new();
         for dv in 0..=(2 * vy) {
@@ -619,9 +682,9 @@ pub fn measure_point(p: &Project, o: &Oriented, imgs: &[Gray; 2], a: usize, ua: 
         let off_v = ra.y - ra.y.round();
         ((su0 + best.1) as f64 + off_u, (sv0 + h + best.2) as f64 + off_v)
     };
-    let r = refine_lsm(&rect, &cams, &o.poses, imgs, side_a, ra.x, ra.y, ub0, vb0, half)
+    let r = refine_lsm(&rect, &cams, &poses, imgs, side_a, ra.x, ra.y, ub0, vb0, half)
         .ok_or_else(|| anyhow::anyhow!("LSM nicht konvergiert – Gegenpunkt manuell setzen"))?;
-    let Some(pb) = rect.rect_to_orig(side_b, &cams[b], &o.poses[b], r.x, r.y) else { bail!("Rückabbildung fehlgeschlagen") };
+    let Some(pb) = rect.rect_to_orig(side_b, &cams[b], &poses[b], r.x, r.y) else { bail!("Rückabbildung fehlgeschlagen") };
     let sig_match = (0.5 * (r.cov[(0, 0)] + r.cov[(1, 1)])).sqrt().max(0.03);
     let mut px = [Vector2::zeros(); 2];
     px[a] = Vector2::new(ua, va);

@@ -117,21 +117,41 @@ fn render(cam: &Camera, pose: &Pose, targets: &[(f64, f64)], noise: f64, seed: u
 
 /// Erzeugt Bilder und Projektdatei in `dir`. Rückgabe: Pfad der Projektdatei.
 pub fn generate(dir: &Path) -> Result<std::path::PathBuf> {
+    generate_with(dir, 2)
+}
+
+/// Wie `generate`, aber mit `n` ≥ 2 Bildern in einem Streifen (Basis ≈ 122/(n−1) m, Bild 1 und n
+/// wie beim Stereopaar). Bilder: bild1.png … bildN.png.
+pub fn generate_with(dir: &Path, n: usize) -> Result<std::path::PathBuf> {
+    assert!(n >= 2);
     std::fs::create_dir_all(dir)?;
     let cam = Camera { width: 2400, height: 1800, fx: 3000.0, fy: 3000.0, cx: 1203.2, cy: 897.6, k1: -0.06, k2: 0.012, k3: 0.0, p1: 0.0004, p2: -0.0002 };
-    let poses = [
-        Pose { r: r_cv_from_opk(0.010, -0.008, 0.02), c: Vector3::new(-60.0, 2.0, 750.0) },
-        Pose { r: r_cv_from_opk(-0.006, 0.012, 0.035), c: Vector3::new(62.0, -3.0, 752.0) },
-    ];
+    let first = Pose { r: r_cv_from_opk(0.010, -0.008, 0.02), c: Vector3::new(-60.0, 2.0, 750.0) };
+    let last = Pose { r: r_cv_from_opk(-0.006, 0.012, 0.035), c: Vector3::new(62.0, -3.0, 752.0) };
+    let poses: Vec<Pose> = (0..n)
+        .map(|k| {
+            if k == 0 {
+                first.clone()
+            } else if k == n - 1 {
+                last.clone()
+            } else {
+                // Zwischenbilder: lineare Interpolation der Lage, leicht abweichende Drehung
+                let t = k as f64 / (n - 1) as f64;
+                let w = |a: f64, b: f64| a + t * (b - a);
+                Pose { r: r_cv_from_opk(w(0.010, -0.006) + 0.004, w(-0.008, 0.012) - 0.003, w(0.02, 0.035)), c: first.c + (last.c - first.c) * t }
+            }
+        })
+        .collect();
     let ctrl: Vec<(f64, f64)> = vec![(-110.0, -95.0), (0.0, -100.0), (110.0, -90.0), (-115.0, 5.0), (115.0, 0.0), (-105.0, 95.0), (5.0, 100.0), (110.0, 95.0)];
     let checks: Vec<(f64, f64)> = vec![(-50.0, -55.0), (60.0, 30.0), (-30.0, 60.0), (80.0, -70.0)];
     let targets: Vec<(f64, f64)> = ctrl.iter().chain(&checks).cloned().collect();
     let mut p = Project { name: "Synthetisches Luftbildpaar".into(), ..Default::default() };
-    for k in 0..2 {
+    p.images.clear();
+    for k in 0..n {
         let img = render(&cam, &poses[k], &targets, 2.0, 11 + k as u64);
         let name = format!("bild{}.png", k + 1);
         img.save_png(&dir.join(&name))?;
-        p.images[k] = ImageEntry { path: name, camera: cam.clone() };
+        p.images.push(ImageEntry { path: name, camera: cam.clone() });
     }
     // Passpunkte (absolute Koordinaten) und Bildmessungen mit Rauschen 0,3 px
     let mut seed = 99u64;
@@ -146,7 +166,7 @@ pub fn generate(dir: &Path) -> Result<std::path::PathBuf> {
         let id = if check { format!("K{}", i - ctrl.len() + 1) } else { format!("P{}", i + 1) };
         let z = surface(x, y);
         p.gcps.push(Gcp { id: id.clone(), x: x + E0, y: y + N0, z, sxy: 0.02, sz: 0.02, check });
-        for k in 0..2 {
+        for k in 0..n {
             if let Some(px) = cam.project_cam(&poses[k].to_cam(&Vector3::new(x, y, z))) {
                 if cam.in_image(&px, 5.0) {
                     p.marks.push(Mark { id: id.clone(), image: k, u: px.x + 0.3 * gauss(), v: px.y + 0.3 * gauss() });

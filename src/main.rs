@@ -63,7 +63,7 @@ struct DenseOut {
 }
 
 enum Job {
-    Loaded(anyhow::Result<[Gray; 2]>),
+    Loaded(anyhow::Result<Vec<Gray>>),
     Oriented(anyhow::Result<(Oriented, String, AnaPair)>),
     Dense(anyhow::Result<DenseOut>),
 }
@@ -71,7 +71,7 @@ enum Job {
 struct App {
     project: Project,
     path: Option<PathBuf>,
-    imgs: Option<Arc<[Gray; 2]>>,
+    imgs: Option<Arc<Vec<Gray>>>,
     views: [Viewer; 2],
     big: Viewer,
     oriented: Option<Oriented>,
@@ -268,7 +268,7 @@ impl App {
         let paths = [self.project.resolve(&self.project.images[0].path), self.project.resolve(&self.project.images[1].path)];
         self.spawn(ctx, move |log| {
             log("Bilder werden geladen …".into());
-            let r = (|| Ok([Gray::load(&paths[0])?, Gray::load(&paths[1])?]))();
+            let r = (|| Ok(vec![Gray::load(&paths[0])?, Gray::load(&paths[1])?]))();
             Job::Loaded(r)
         });
     }
@@ -278,9 +278,10 @@ impl App {
             self.status = "Zuerst Bilder laden".into();
             return;
         };
-        let p = self.project.clone();
+        // Die GUI arbeitet mit den ersten beiden Bildern (Mehrbildverbände: CLI)
+        let p = self.project.pair(0, 1);
         self.spawn(ctx, move |log| {
-            let r = pipeline::orient(&p, &imgs, log).map(|(o, rep)| {
+            let r = pipeline::orient(&p, &imgs[..2], log).map(|(o, rep)| {
                 let cams = [p.images[0].camera.clone(), p.images[1].camera.clone()];
                 let s = (1800.0 / cams[0].width.max(cams[0].height) as f64).min(1.0);
                 let rect = Rectification::compute(&cams, &o.poses, s);
