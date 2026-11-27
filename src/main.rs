@@ -1,5 +1,7 @@
 //! stereo3d – grafische Oberfläche (egui)
 
+mod update;
+mod version;
 mod viewer;
 
 use eframe::egui::{self, Color32, Pos2, RichText, Vec2};
@@ -17,7 +19,7 @@ use viewer::{Overlay, Viewer};
 
 fn main() -> eframe::Result {
     let opts = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1600.0, 950.0]).with_title("stereo3d – Stereoauswertung"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1600.0, 950.0]).with_title(concat!("stereo3d – Stereoauswertung ", env!("CARGO_PKG_VERSION"))),
         ..Default::default()
     };
     let start = std::env::args().nth(1).map(PathBuf::from);
@@ -101,6 +103,7 @@ struct App {
     status: String,
     new_gcp: String,
     pending_load: bool,
+    updater: update::Updater,
 }
 
 impl App {
@@ -135,7 +138,9 @@ impl App {
             status: String::new(),
             new_gcp: String::new(),
             pending_load: false,
+            updater: update::Updater::default(),
         };
+        app.updater.search_quietly(&cc.egui_ctx);
         if let Some(p) = start {
             app.open(&p);
         }
@@ -222,6 +227,7 @@ impl eframe::App for App {
         egui::Panel::bottom("log").resizable(true).default_size(110.0).show(ui, |ui| self.log_panel(ui));
         egui::Panel::left("side").resizable(true).default_size(470.0).show(ui, |ui| self.side_panel(ui, &ctx));
         egui::CentralPanel::default().show(ui, |ui| self.central(ui, &ctx));
+        self.updater.show(&ctx);
         if self.busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
@@ -437,6 +443,12 @@ impl App {
                 ui.spinner();
                 ui.label("Berechnung läuft …");
             }
+            ui.separator();
+            ui.menu_button("Hilfe", |ui| {
+                self.updater.menu_entry(ui);
+                ui.separator();
+                ui.label(format!("{} {}", version::PROGRAMM, version::FULL));
+            });
             let _ = ctx;
         });
     }

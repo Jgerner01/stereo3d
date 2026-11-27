@@ -1,6 +1,6 @@
 [package]
 name = "stereo3d"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
@@ -12,10 +12,18 @@ rayon = "1.12.0"
 rfd = { version = "0.18.0", optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.2.1"
+# Update-Funktion der Oberfläche
+serde_json = { version = "1", optional = true }
+sha2 = { version = "0.11", optional = true }
+ureq = { version = "3", optional = true }
+zip = { version = "9", default-features = false, features = ["deflate"], optional = true }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
 
 [features]
 default = ["gui"]
-gui = ["dep:eframe", "dep:rfd"]
+gui = ["dep:eframe", "dep:rfd", "dep:serde_json", "dep:sha2", "dep:ureq", "dep:zip"]
 
 [[bin]]
 name = "stereo3d"

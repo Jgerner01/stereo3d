@@ -1,0 +1,5 @@
+# Zweck:    Build-Ausgabe außerhalb des synchronisierten Projektordners ablegen
+# Hardware: Windows-PC
+# Autor:    Johann Gerner
+[build]
+target-dir = "C:/rust-target/stereo3d"
